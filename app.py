@@ -71,7 +71,10 @@ except ImportError:
 APP_NAME = "CJ ProjectHub"
 APP_VERSION = "v2.1"
 # 비밀번호는 Streamlit Secrets에서 관리 (.streamlit/secrets.toml)
-MASTER_PASSWORD = st.secrets.get("MASTER_PASSWORD", "CJ_ProjectHub_2026!@#")
+try:
+    MASTER_PASSWORD = st.secrets["MASTER_PASSWORD"]
+except (KeyError, FileNotFoundError, Exception):
+    MASTER_PASSWORD = "CJ_ProjectHub_2026!@#"
 
 # ── 데이터 파일 경로 탐색 ──
 DATA_FILE = None
@@ -110,7 +113,10 @@ for base in [EXE_DIR, BUNDLE_DIR, os.path.join(EXE_DIR, '..'),
 # ============================================================
 #  건설공사비 지수 (KOSIS API + Fallback)
 # ============================================================
-KOSIS_API_KEY = st.secrets.get("KOSIS_API_KEY", "YTg3ZmQxN2M4ZTRmZmIwMjJlZjI3M2IwNTMyMGUxZTY=")
+try:
+    KOSIS_API_KEY = st.secrets["KOSIS_API_KEY"]
+except (KeyError, FileNotFoundError, Exception):
+    KOSIS_API_KEY = "YTg3ZmQxN2M4ZTRmZmIwMjJlZjI3M2IwNTMyMGUxZTY="
 KOSIS_ORG_ID  = "397"
 KOSIS_TBL_ID  = "DT_39701_A003"
 KOSIS_NONRES  = "15397AA2AA12"
