@@ -1,7 +1,8 @@
 """
-CJ ProjectHub — Streamlit 기반 통합 앱 v2.1 (Streamlit Community Cloud 배포용)
+CJ ProjectHub — Streamlit 기반 통합 앱 v2.2 (Streamlit Community Cloud 배포용)
 대시보드 · 건설공사비 지수 반영 · 유사현장 검색 · 키워드 본문 검색 · 준공보고서 검색 · 보고서 관리 · 모델 설명
 ※ 이 파일은 Streamlit Community Cloud 배포 전용입니다. 로컬 실행은 원본 app.py를 사용하세요.
+※ v2.2: Google Drive 연동으로 클라우드에서 준공보고서 열람 지원
 """
 import os, sys, io, json, math, getpass, shutil, tempfile, zipfile, base64
 from datetime import datetime
@@ -721,6 +722,213 @@ class SecurePackageLoader:
 
 
 # ============================================================
+#  Google Drive 보고서 로더 (클라우드 배포용)
+# ============================================================
+class GoogleDriveReportLoader:
+    """Google Drive 공유 폴더에서 보고서 이미지를 온디맨드로 로드하는 클래스.
+    SecurePackageLoader와 동일한 인터페이스를 제공합니다.
+
+    필요 설정:
+    - GOOGLE_API_KEY: Google Cloud Console에서 발급한 API 키
+    - DRIVE_FOLDER_ID: 보고서가 업로드된 Google Drive 폴더 ID
+    """
+
+    def __init__(self, folder_id, api_key):
+        self.folder_id = folder_id
+        self.api_key = api_key
+        self.manifest = None
+        self._projects = {}      # {project_id: {folder_id, pages: {name: file_id}}}
+        self._loaded = False
+        self._load_error = None
+        try:
+            self._init_structure()
+        except Exception as e:
+            self._load_error = str(e)
+
+    def _drive_api_list(self, query, page_size=1000):
+        """Google Drive API v3 files.list 호출"""
+        if not _requests:
+            return []
+        all_files = []
+        page_token = None
+        api_url = "https://www.googleapis.com/drive/v3/files"
+        while True:
+            params = {
+                "q": query,
+                "key": self.api_key,
+                "pageSize": min(page_size, 1000),
+                "fields": "nextPageToken,files(id,name,mimeType)",
+                "supportsAllDrives": "true"
+            }
+            if page_token:
+                params["pageToken"] = page_token
+            try:
+                resp = _requests.get(api_url, params=params, timeout=30)
+                if resp.status_code != 200:
+                    error_detail = resp.json().get('error', {}).get('message', resp.text[:200])
+                    raise Exception(f"Drive API 오류 ({resp.status_code}): {error_detail}")
+                data = resp.json()
+                all_files.extend(data.get("files", []))
+                page_token = data.get("nextPageToken")
+                if not page_token:
+                    break
+            except _requests.exceptions.Timeout:
+                break
+            except Exception:
+                raise
+        return all_files
+
+    def _init_structure(self):
+        """프로젝트 폴더 목록만 로드 (빠른 초기화)"""
+        folders = self._drive_api_list(
+            f"'{self.folder_id}' in parents and mimeType='application/vnd.google-apps.folder'"
+        )
+        for f in folders:
+            self._projects[f['name']] = {
+                'folder_id': f['id'],
+                'pages': None,  # lazy load
+                'page_count': None
+            }
+
+        # manifest.json 찾기 (있으면 텍스트 검색 지원)
+        manifests = self._drive_api_list(
+            f"'{self.folder_id}' in parents and name='manifest.json'"
+        )
+        if manifests:
+            try:
+                dl_url = f"https://www.googleapis.com/drive/v3/files/{manifests[0]['id']}?alt=media&key={self.api_key}"
+                resp = _requests.get(dl_url, timeout=30)
+                if resp.status_code == 200:
+                    self.manifest = resp.json()
+                    # manifest에서 page_count 채우기
+                    for code, info in self.manifest.get('reports', {}).items():
+                        if code in self._projects:
+                            self._projects[code]['page_count'] = info.get('page_count', 0)
+            except Exception:
+                pass  # manifest 없어도 기본 기능 동작
+
+        # manifest가 없는 경우, 프로젝트별 page_count는 lazy load 시 설정
+        if not self.manifest:
+            self.manifest = {'reports': {}}
+            # 각 프로젝트를 manifest에 기본 등록
+            for proj_id in self._projects:
+                self.manifest['reports'][proj_id] = {
+                    'original_name': proj_id,
+                    'page_count': 0,
+                    'text_index': []
+                }
+
+        self._loaded = True
+
+    def _load_project_pages(self, project_id):
+        """특정 프로젝트의 페이지 목록을 lazy load"""
+        proj = self._projects.get(project_id)
+        if not proj or proj['pages'] is not None:
+            return  # 이미 로드됨
+
+        files = self._drive_api_list(
+            f"'{proj['folder_id']}' in parents and mimeType='image/png'"
+        )
+        pages = {}
+        for f in files:
+            pages[f['name']] = f['id']
+        proj['pages'] = pages
+        proj['page_count'] = len(pages)
+
+        # manifest 업데이트
+        if project_id in self.manifest.get('reports', {}):
+            self.manifest['reports'][project_id]['page_count'] = len(pages)
+        else:
+            self.manifest['reports'][project_id] = {
+                'original_name': project_id,
+                'page_count': len(pages),
+                'text_index': []
+            }
+
+    def is_loaded(self):
+        return self._loaded
+
+    def has_report(self, site_code):
+        return str(site_code) in self._projects
+
+    def get_page_count(self, site_code):
+        site_code = str(site_code)
+        if site_code not in self._projects:
+            return 0
+        self._load_project_pages(site_code)
+        return self._projects[site_code].get('page_count', 0)
+
+    def get_original_name(self, site_code):
+        site_code = str(site_code)
+        if self.manifest and site_code in self.manifest.get('reports', {}):
+            return self.manifest['reports'][site_code].get('original_name', site_code)
+        return site_code
+
+    def get_page_image(self, site_code, page_no):
+        """Google Drive에서 개별 페이지 이미지를 다운로드"""
+        site_code = str(site_code)
+        if not self.has_report(site_code):
+            return None
+        if not HAS_PIL:
+            return None
+
+        self._load_project_pages(site_code)
+        pages = self._projects[site_code].get('pages', {})
+
+        # page_001.png 또는 slide_001.png 형식 시도
+        for prefix in ['page_', 'slide_']:
+            page_name = f"{prefix}{page_no:03d}.png"
+            if page_name in pages:
+                file_id = pages[page_name]
+                # 세션 캐시에서 먼저 확인
+                cache_key = f"gdrive_img_{site_code}_{page_no}"
+                if cache_key in st.session_state:
+                    return st.session_state[cache_key]
+
+                try:
+                    dl_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media&key={self.api_key}"
+                    resp = _requests.get(dl_url, timeout=30)
+                    if resp.status_code == 200:
+                        img = Image.open(io.BytesIO(resp.content)).copy()
+                        st.session_state[cache_key] = img
+                        return img
+                except Exception:
+                    pass
+        return None
+
+    def search_text(self, keyword):
+        """manifest의 text_index에서 키워드 검색 (manifest가 있는 경우에만)"""
+        if not self.manifest:
+            return []
+        results = []
+        kw = keyword.lower().strip()
+        if not kw:
+            return []
+        for site_code, info in self.manifest.get('reports', {}).items():
+            for entry in info.get('text_index', []):
+                content = entry.get('content', '')
+                if kw in content.lower():
+                    idx = content.lower().find(kw)
+                    start = max(0, idx - 30)
+                    end = min(len(content), idx + len(keyword) + 30)
+                    snippet = content[start:end].replace('\n', ' ')
+                    if start > 0:
+                        snippet = '…' + snippet
+                    if end < len(content):
+                        snippet = snippet + '…'
+                    results.append({
+                        'site_code': site_code,
+                        'page': entry['page'],
+                        'snippet': snippet,
+                        'original_name': info.get('original_name', '')
+                    })
+        return results
+
+    def get_all_report_codes(self):
+        return list(self._projects.keys())
+
+
+# ============================================================
 #  워터마크 헬퍼
 # ============================================================
 def add_watermark(img):
@@ -977,13 +1185,32 @@ def main():
 
     models = build_models(subsets)
 
-    # 보고서 패키지 로드
+    # 보고서 패키지 로드 (로컬: SecurePackageLoader / 클라우드: GoogleDriveReportLoader)
     if 'pkg_loader' not in st.session_state:
+        # 1순위: 로컬 패키지 파일
         if PACKAGE_FILE and os.path.exists(PACKAGE_FILE) and HAS_CRYPTO and HAS_PIL:
             with st.spinner("📦 보고서 패키지 로딩 중..."):
                 st.session_state['pkg_loader'] = SecurePackageLoader(PACKAGE_FILE)
         else:
-            st.session_state['pkg_loader'] = None
+            # 2순위: Google Drive 연동 (Streamlit Secrets에서 설정)
+            _gdrive_folder_id = None
+            _gdrive_api_key = None
+            try:
+                _gdrive_folder_id = st.secrets.get("DRIVE_FOLDER_ID", None)
+                _gdrive_api_key = st.secrets.get("GOOGLE_API_KEY", None)
+            except Exception:
+                pass
+            if _gdrive_folder_id and _gdrive_api_key and _requests and HAS_PIL:
+                with st.spinner("☁️ Google Drive에서 보고서 로딩 중..."):
+                    try:
+                        st.session_state['pkg_loader'] = GoogleDriveReportLoader(
+                            _gdrive_folder_id, _gdrive_api_key
+                        )
+                    except Exception as e:
+                        st.sidebar.warning(f"Google Drive 연동 실패: {e}")
+                        st.session_state['pkg_loader'] = None
+            else:
+                st.session_state['pkg_loader'] = None
     pkg = st.session_state['pkg_loader']
 
     # 건축물종류 목록
@@ -1043,7 +1270,10 @@ def main():
         st.divider()
 
         # 데이터 현황
-        pkg_status = "✅ 로드됨" if (pkg and pkg.is_loaded()) else "❌ 미로드"
+        if pkg and pkg.is_loaded():
+            pkg_status = "✅ Google Drive" if isinstance(pkg, GoogleDriveReportLoader) else "✅ 로컬"
+        else:
+            pkg_status = "❌ 미로드"
         n_off = len(subsets.get('업무시설', []))
         n_wh = len(subsets.get('창고시설', []))
         st.markdown(f"""
@@ -1314,7 +1544,8 @@ def main():
                 else:
                     st.warning(f"'{kw}'에 대한 검색 결과가 없습니다.")
         else:
-            st.warning("📦 보고서 패키지가 로드되지 않았습니다. reports.pkg 파일이 필요합니다.")
+            st.warning("📦 보고서 패키지가 로드되지 않았습니다. "
+                       "로컬: reports.pkg 필요 / 클라우드: Secrets에 GOOGLE_API_KEY, DRIVE_FOLDER_ID 설정 필요")
 
     # ══════════════════════════════════════════
     #  탭 5: 준공보고서 검색
@@ -1521,7 +1752,8 @@ def main():
             else:
                 st.info("패키지에 수록된 보고서가 없습니다.")
         else:
-            st.warning("📦 보고서 패키지가 로드되지 않았습니다. reports.pkg 파일이 필요합니다.")
+            st.warning("📦 보고서 패키지가 로드되지 않았습니다. "
+                       "로컬: reports.pkg 필요 / 클라우드: Secrets에 GOOGLE_API_KEY, DRIVE_FOLDER_ID 설정 필요")
 
     # ══════════════════════════════════════════
     #  탭 7: 보고서 관리
@@ -1725,11 +1957,18 @@ def main():
         st.markdown('<div class="section-title">📦 패키지 현황</div>', unsafe_allow_html=True)
         if pkg and pkg.is_loaded() and pkg.manifest:
             total_reports = len(pkg.manifest.get('reports', {}))
+            _is_gdrive = isinstance(pkg, GoogleDriveReportLoader)
+            _pkg_label = "Google Drive" if _is_gdrive else "reports.pkg"
+            _pkg_size_str = ""
+            if not _is_gdrive and PACKAGE_FILE and os.path.exists(PACKAGE_FILE):
+                _pkg_size_str = f'<div class="sub">{os.path.getsize(PACKAGE_FILE)/1e9:.1f} GB</div>'
+            elif _is_gdrive:
+                _pkg_size_str = '<div class="sub">☁️ 클라우드</div>'
             st.markdown(f"""
             <div class="kpi-row">
                 <div class="kpi-card"><div class="icon">📦</div>
-                    <div class="label">패키지 파일</div><div class="value" style="font-size:1rem;">reports.pkg</div>
-                    <div class="sub">{os.path.getsize(PACKAGE_FILE)/1e9:.1f} GB</div></div>
+                    <div class="label">패키지 소스</div><div class="value" style="font-size:1rem;">{_pkg_label}</div>
+                    {_pkg_size_str}</div>
                 <div class="kpi-card" style="border-left-color:#00cc96;"><div class="icon">📄</div>
                     <div class="label">수록 보고서</div><div class="value">{total_reports}</div><div class="sub">건</div></div>
             </div>""", unsafe_allow_html=True)
