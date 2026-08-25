@@ -1,0 +1,36 @@
+# 대용량 파일
+reports.pkg
+*.exe
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# 빌드
+dist/
+build/
+*.spec
+
+# 로컬 환경
+logs/
+output/
+new/
+new2/
+Reports/
+Reports_원본백업/
+
+# 보안 (Streamlit Secrets는 웹에서 별도 관리)
+.streamlit/secrets.toml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 로컬 전용 파일
+launcher.py
+build_exe.bat
+app_cloud.py
+cloud_storage_helper.py

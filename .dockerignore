@@ -1,0 +1,16 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+dist/
+build/
+*.spec
+*.exe
+reports.pkg
+Reports/
+Reports_원본백업/
+logs/
+output/
+new/
+new2/
+.git/
