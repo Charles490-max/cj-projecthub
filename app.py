@@ -1,4 +1,5 @@
-import streamlit as st 
-st.set_page_config(page_title="CJ ProjectHub Test", page_icon="???") 
-st.title("CJ ProjectHub - Å×½ºÆ® ¼º°ø!") 
-st.write("¹èÆ÷°¡ Á¤»óÀûÀ¸·Î ¿Ï·áµÇ¾ú½À´Ï´Ù.") 
+import streamlit as st
+
+st.set_page_config(page_title="CJ ProjectHub Test", page_icon="ğŸ—ï¸")
+st.title("CJ ProjectHub - Test OK!")
+st.write("Deployment successful.")
